@@ -1,0 +1,38 @@
+ingress:
+  
+  enabled: true
+
+  className: alb 
+  
+  annotations:
+
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    alb.ingress.kubernetes.io/target-type: ip 
+
+    alb.ingress.kubernetes.io/listen-ports: |
+      [
+        {"HTTPS":443}
+      ]
+
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    
+    alb.ingress.kubernetes.io/group.name: api
+
+    alb.ingress.kubernetes.io/certificate-arn: "" 
+
+  
+  paths: 
+    - path: /api/auth
+      pathType: Prefix
+
+      service: 
+        name: auth-service
+        port: 80  
+
+    - path: /api/cart 
+      pathType: Prefix
+
+      service:
+        name: cart-service
+        port: 80  

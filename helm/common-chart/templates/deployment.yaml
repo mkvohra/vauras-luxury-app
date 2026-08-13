@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "common-chart.fullname" . }}
+
+  #this label if to only identify the deployment object
+  labels:
+    {{- include "common-chart.labels" . | nindent 4 }}
+
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+
+  #Deployment uses this selector's label to find the Pods with this same label.
+  #this label must be the same as that of the label inside pod template
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+
+  template:
+    metadata:
+      #deployment object uses this label and match it with selector label to know which pods it handles
+      labels:
+        {{- include "common-chart.labels" . | nindent 8 }}
+
+    spec:
+      serviceAccountName: {{ include "common-chart.serviceAccountName" . }}
+
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      containers:
+      - name: {{ include "common-chart.fullname" . }}
+
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+ 
+        ports:
+        - containerPort: {{ .Values.service.targetPort }}
+
+        {{- if .Values.readinessProbe.enabled }}
+        readinessProbe:
+          httpGet:
+            path: {{ .Values.readinessProbe.httpGet.path }}
+            port: {{ .Values.service.targetPort }}
+          initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+        {{- end }}
+
+        {{- if .Values.livenessProbe.enabled }}
+        livenessProbe:
+          httpGet:
+            path: {{ .Values.livenessProbe.httpGet.path }}
+            port: {{ .Values.service.targetPort }}
+          initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+        {{- end }}
+
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+
+        {{- if or .Values.configMap.enabled .Values.secret.enabled }}
+        envFrom:
+        {{- if .Values.configMap.enabled }}
+          - configMapRef:
+              name: {{ include "common-chart.fullname" . }}
+        {{- end }}
+        {{- if .Values.secret.enabled }}
+          - secretRef:
+              name: {{ include "common-chart.fullname" . }}
+        {{- end }}
+        {{- end }}

@@ -1,0 +1,51 @@
+replicaCount: 1
+
+namespace: cart 
+
+image:
+  repository: "<ecr_cart_repository>"
+  tag: "dev-latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3001
+
+configMap:
+  enabled: true
+
+  data:
+    NODE_ENV: development
+    PORT: "3001"
+
+secret:
+  enabled: true
+
+  data: 
+    JWT_SECRET: ""
+    DB_HOST: ""
+    DB_PORT: ""
+    DB_NAME: ""
+    DB_USER: ""
+    DB_PASSWORD: "" 
+
+autoscaling:
+  enabled: false 
+
+resources: 
+  requests:
+    cpu: 100m 
+    memory: 128Mi
+  
+  limits:
+    cpu: 500m 
+    memory: 512Mi
+
+readinessProbe:
+  httpGet:
+    path: /api/cart/health        
+
+livenessProbe:
+  httpGet:
+    path: /api/cart/health   

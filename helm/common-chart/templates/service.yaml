@@ -1,0 +1,21 @@
+apiVersion: v1 
+kind: Service
+metadata:
+  name: {{ include "common-chart.fullname" . }}
+  labels: 
+    {{- include "common-chart.labels" . | nindent 4 }}
+
+spec:
+  type: {{ .Values.service.type }}
+  #Service uses this selector's label to find the Pods it should send traffic to.
+  #this must match the label on the Pod template inside deployment.yaml
+  selector: 
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - port: {{ .Values.service.port }}  
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+
+
+

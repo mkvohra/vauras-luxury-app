@@ -1,0 +1,11 @@
+apiVersion: v2 
+
+name: ingress-chart
+
+description: helm chart for ALB Ingress resources
+
+type: application
+
+version: 1.0.0
+
+appVersion: "1.0.0"

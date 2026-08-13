@@ -1,0 +1,26 @@
+@"
+# Terraform state
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.*
+ 
+# Node.js
+**/node_modules/
+
+# Build output
+**/dist/
+
+# Environment files
+**/.env
+**/.env.*
+
+# Logs
+**/*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local Kubernetes testing
+kubernetes/
+"@ | Set-Content .gitignore

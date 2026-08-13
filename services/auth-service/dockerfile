@@ -1,0 +1,20 @@
+# Step 1: base image (Node.js)
+FROM node:20
+
+# Step 2: set working directory
+WORKDIR /app
+
+# Step 3: copy package.json
+COPY package*.json ./
+
+# Step 4: install dependencies
+RUN npm install
+
+# Step 5: copy rest of code
+COPY . .
+
+# Step 6: expose port
+EXPOSE 3000
+
+# Step 7: start server
+CMD ["node", "server.js"]

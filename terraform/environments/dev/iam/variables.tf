@@ -33,3 +33,7 @@ variable "bucket_name" {
 variable "repositories" {
   type = list(string)
 }
+
+variable "app_namespaces" {
+  type = list(string)
+}

@@ -31,7 +31,7 @@ resource "aws_secretsmanager_secret_version" "this" {
 
   secret_id = aws_secretsmanager_secret.this.id
 
-  secret_string = jsoncode({
+  secret_string = jsonencode({
     DB_HOST = var.db_host
     DB_PORT = var.db_port
     DB_NAME = var.db_name 

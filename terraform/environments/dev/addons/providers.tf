@@ -25,21 +25,7 @@ terraform {
 
 
 
-# READING REMOTE STATE OF EKS 
 
-data "terraform_remote_state" "eks" {
-
-  backend = "s3"
-
-  config = {
-
-    bucket = "vauras-terraform-state"
-
-    key = "dev/eks/terraform.tfstate"
-
-    region = "ap-south-1"
-  }
-}
 
 #GETTING CLUSTER DETAILS NEEDED FOR PROVIDER DETAILS
 

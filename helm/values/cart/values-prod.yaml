@@ -19,16 +19,9 @@ configMap:
     NODE_ENV: production
     PORT: "3001"
 
-secret: 
-  enabled: true 
-
-  data:
-    JWT_SECRET: ""
-    DB_HOST: ""
-    DB_PORT: ""
-    DB_NAME: ""
-    DB_USER: ""
-    DB_PASSWORD: ""
+externalSecret:
+  enabled: true
+  remoteSecretName: "vauras-luxury-app/prod/app-secrets"
 
 autoscaling:
   enabled: true

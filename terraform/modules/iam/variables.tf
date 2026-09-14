@@ -41,3 +41,8 @@ variable "bucket_name" {
 variable "ecr_repositories" {
   type = list(string)
 }
+
+variable "app_namespaces" {
+  description = "Kubernetes namespaces the deployment role is granted EKS access to (one per service, per the one-namespace-per-service decision)"
+  type = list(string)
+}

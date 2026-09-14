@@ -1,115 +1,935 @@
-name: Reusable Workflow 
+name : Reusable -- Detection And Global Outputs
+
+# This workflow is READ-ONLY / detection-only by design:
+# it never authenticates to AWS and never touches infra. It just answers
+# "what happened, what changed, and what should downstream workflows use."
+# All AWS side effects and manual-approval gates live in the CALLER
+# workflows (infra.yml / backend.yml / frontend.yml), scoped per-job via
+# GitHub Environments ("dev" / "prod") - which is also what the IAM
+# trust policies in terraform/modules/iam require (sub condition is
+# scoped to "environment:<env>", so a job MUST declare that GitHub
+# Environment to assume any of the 3 roles at all).
+
+
 
 on:
-  workflow_call:
+  workflow_call :
     
+    inputs:
+      requested_environment: 
+        description:  "Environment requested for a manual workflow_dispatch run"
+        required: false
+        type: string
+
+      since_sha:
+        description: "Optional baseline commit SHA to diff against for a scoped workflow_dispatch run. Leave empty for a full run (every root/service treated as changed)."
+        required: false
+        type: string  
+
+      deployment_sha: 
+        description:  "commit sha manually provided for workflow_dispatch (manual) run"
+        required: false
+        type: string  
+      
+      deployment_tag:
+        description: "Production release tag to deploy for a manual production workflow_dispatch run, for example v2.3.0." 
+        required: false
+        type: string
+        
+      since_tag:
+        description: "Optional production release tag to use as the comparison baseline for a manual production workflow_dispatch run."
+        required: false
+        type: string  
+    
+
     outputs:
+
       environment:
-        description: "Deployment environment (dev/prod)"
-        value: ${{ jobs.environment.outputs.environment }}
+        description: "dev or prod"
+        value: ${{ jobs.detect.outputs.environment }}
       
-      aws-region:
-        description: "AWS Region"
-        value: ${{ jobs.global.outputs.aws-region }}
-      
-      aws-role:
-        description: "IAM Role ARN"
-        value: ${{ jobs.global.outputs.aws-role }}
+      trigger_type:
+        description: "pull_request | push | tag | workflow_dispatch"
+        value: ${{ jobs.detect.outputs.trigger_type }}
+
+      sha_before:
+        value: ${{ jobs.detect.outputs.sha_before }}
+
+      sha_after:
+        value: ${{ jobs.detect.outputs.sha_after }}
+
+      current_tag:
+        value: ${{ jobs.detect.outputs.current_tag }}
+
+      previous_prod_tag:
+        value: ${{ jobs.detect.outputs.previous_prod_tag }}
+
+      changed_terraform_roots:
+        description: "JSON array, dependency-ordered, of changed terraform roots for this environment"
+        value: ${{ jobs.detect.outputs.changed_terraform_roots }}
+
+      changed_backend_services:
+        description: "JSON array of changed backend services (auth-service / cart-service)"
+        value: ${{ jobs.detect.outputs.changed_backend_services }}
+
+      frontend_changed:
+        value: ${{ jobs.detect.outputs.frontend_changed }}
+
+      has_infra_changes:
+        value: ${{ jobs.detect.outputs.has_infra_changes }}
+
+      has_backend_changes:
+        value: ${{ jobs.detect.outputs.has_backend_changes }}
+
+      has_frontend_changes:
+        value: ${{ jobs.detect.outputs.has_frontend_changes }}
+
+      aws_region:
+        value: ${{ jobs.detect.outputs.aws_region }}
+
+      aws_account_id:
+        value: ${{ jobs.detect.outputs.aws_account_id }}
+
+      terraform_role_arn:
+        description: "Role to assume for infra.yml (terraform plan/apply)"
+        value: ${{ jobs.detect.outputs.terraform_role_arn }}
+
+      deployment_role_arn:
+        description: "Role to assume for backend.yml (ECR push, EKS describe, Secrets Manager read)"
+        value: ${{ jobs.detect.outputs.deployment_role_arn }}
+
+      frontend_role_arn:
+        description: "Role to assume for frontend.yml (S3 sync, CloudFront invalidate)"
+        value: ${{ jobs.detect.outputs.frontend_role_arn }}
+
+      eks_cluster_name:
+        value: ${{ jobs.detect.outputs.eks_cluster_name }}
+
+      image_tag:
+        description: "git SHA (short) - used to tag images pushed to ECR"
+        value: ${{ jobs.detect.outputs.image_tag }} 
+
+      terraform_execution_levels:
+        description: "JSON array of dependency-safe Terraform execution levels"
+        value: ${{ jobs.detect.outputs.terraform_execution_levels }}  
+
+      directly_changed_terraform_roots:
+        description: "JSON array of Terraform roots directly changed by the commit"
+        value: ${{ jobs.detect.outputs.directly_changed_terraform_roots }}  
+
+      terraform_plan_role_arn:
+        description: "ARN of the Terraform plan-only IAM role"
+        value: ${{ jobs.detect.outputs.terraform_plan_role_arn }}  
         
-      cluster-name:
-        description: "EKS Cluster Name"  
-        value: ${{ jobs.global.outputs.cluster-name }}
-        
-      changed-files:
-        description: "Changed files"
-        value: ${{ jobs.changes.outputs.changed-files }}
-        
+permissions:
+  contents: read
+  pull-requests: read
+
 
 jobs:
+  detect:
+    runs-on: ubuntu-latest
+    # deliberately NOT environment-scoped: this job makes no AWS calls
+    # and must be free to run on every PR without waiting on approval
+ 
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      trigger_type: ${{ steps.env.outputs.trigger_type }}
+      sha_before: ${{ steps.git.outputs.sha_before }}
+      sha_after: ${{ steps.git.outputs.sha_after }}
+      current_tag: ${{ steps.git.outputs.current_tag }}
+      previous_prod_tag: ${{ steps.git.outputs.previous_prod_tag }}
+      changed_terraform_roots: ${{ steps.changes.outputs.changed_terraform_roots }}
+      changed_backend_services: ${{ steps.changes.outputs.changed_backend_services }}
+      frontend_changed: ${{ steps.changes.outputs.frontend_changed }}
+      has_infra_changes: ${{ steps.changes.outputs.has_infra_changes }}
+      has_backend_changes: ${{ steps.changes.outputs.has_backend_changes }}
+      has_frontend_changes: ${{ steps.changes.outputs.has_frontend_changes }}
+      aws_region: ${{ steps.global.outputs.aws_region }}
+      aws_account_id: ${{ steps.global.outputs.aws_account_id }}
+      terraform_role_arn: ${{ steps.global.outputs.terraform_role_arn }}
+      deployment_role_arn: ${{ steps.global.outputs.deployment_role_arn }}
+      frontend_role_arn: ${{ steps.global.outputs.frontend_role_arn }}
+      eks_cluster_name: ${{ steps.global.outputs.eks_cluster_name }}
+      image_tag: ${{ steps.git.outputs.image_tag }}
+      terraform_execution_levels: ${{ steps.changes.outputs.terraform_execution_levels }}
+      directly_changed_terraform_roots: ${{ steps.changes.outputs.directly_changed_terraform_roots }}
+      terraform_plan_role_arn: ${{ steps.global.outputs.terraform_plan_role_arn }}
   
-  environment:
-
-    name: Determine Environment
-    
-    runs-on: ubuntu-latest
-
-    outputs:
-      environment: ${{ steps.detect.outputs.environment }}
     
     steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  
       
-      - name: Detect Environment
+      # ---------------------------------------------------------------
+      # 1) ENVIRONMENT + TRIGGER TYPE DETECTION
+      # ---------------------------------------------------------------          
 
-        id: detect
-
-        shell: bash
-
+      - name: Detect Environment and Trigger Type
+        id: env
         run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "environment=prod" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            trigger_type="pull_request"
+            base_ref="${{ github.event.pull_request.base.ref }}"
+
+            if [ "$base_ref" = "main" ]; then
+              environment="prod"
+            else
+              environment="dev" 
+            fi
+          
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            trigger_type="tag"
+            
+            git fetch origin main --quiet
+
+            if git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
+              environment="prod"
+            else
+              echo "::error::Tag '${{ github.ref_name }}' does not point to a commit on main. production deployments must use tags created from main."
+              exit 1
+            fi    
+
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            trigger_type="push"
+            branch="${{ github.ref_name }}"
+             
+            if [ "$branch" = "main" ]; then
+              environment="prod" 
+            else
+              environment="dev"
+            fi
+            
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            trigger_type="workflow_dispatch"
+            
+            if [ -z "${{ inputs.requested_environment }}" ]; then
+              echo "::error::requested_environment is required for workflow_dispatch"
+              exit 1
+            fi
+            
+            environment="${{ inputs.requested_environment }}"
+
+          
+            
+            if [ "$environment" != "dev" ] && [ "$environment" != "prod" ]; then
+                echo "::error::Invalid requested_environment '$environment'. Expected 'dev' or 'prod'."
+                exit 1
+            fi  
+
+            # might remove  this next else..if code 
           else
-            echo "environment=dev" >> "$GITHUB_OUTPUT"
-          fi    
+            echo "::error:Unsupported Github event: ${{ github.event_name }}"  
+          fi  
 
-  global:
-    
-    name: Determine Global Outputs
+          echo "environment=$environment" >> "$GITHUB_OUTPUT"
+          echo "trigger_type=$trigger_type" >> "$GITHUB_OUTPUT"
 
-    runs-on: ubuntu-latest
-    
-    needs: environment
+          echo "Resolved: environment=$environment trigger_type=$trigger_type"
 
-    outputs:
-      aws-region: ${{ steps.global.aws-region }}
-      aws-role: ${{ steps.global.outputs.aws-role }}
-      cluster-name: ${{ steps.global.outputs.cluster-name }}
+          
 
-    steps:
-      
-      - name: Set Global Outputs
-        
-        id: global
+      # ---------------------------------------------------------------
+      # 2) COMMIT SHA + TAG DETECTION
+      # ---------------------------------------------------------------    
 
-        shell: bash
-
+      - name: Detect commit SHAs and tags
+        id: git
         run: |
-          if [[ "${{ needs.environment.outputs.environment }}" == "dev" ]]; then
-            echo "aws-region=ap-south-1" >> "$GITHUB_OUTPUT"
-            echo "aws-role=DEV_ROLE_PLACEHOLDER" >> "$GITHUB_OUTPUT"
-            echo "cluster-name=dev-cluster" >> "$GITHUB_OUTPUT"
-           
+          set -euo pipefail
+
+          trigger_type="${{ steps.env.outputs.trigger_type }}"
+          environment="${{ steps.env.outputs.environment }}"
+
+          # main's history is needed to validate production tags below
+
+          git fetch origin main --quiet
+
+          # -----------------------------------------------------------------
+          # BUILD THE LIST OF VALID PRODUCTION TAGS
+          # -----------------------------------------------------------------
+
+          valid_prod_tags=""
+          
+          while IFS= read -r t; do
+            
+            [ -z "$t" ] && continue
+            
+            tag_sha="$(git rev-list -n 1 "$t")"
+
+            if git merge-base --is-ancestor "$tag_sha" origin/main 2>/dev/null; then
+              valid_prod_tags="${valid_prod_tags}${t}"$'\n'
+            fi
+          
+          done <<< "$(git tag --list | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+
+          
+          
+          # Sort VALID production tags by semantic version. Never use creation date because humans can create tags later, backdate them, or accidentally create an old version today
+
+          valid_prod_tags_sorted="$(printf '%s' "$valid_prod_tags" | sed '/^$/d' | sort -V)"
+
+          # -----------------------------------------------------------------
+          # DETERMINE CURRENT TAG + PREVIOUS PRODUCTION TAG
+          # ----------------------------------------------------------------
+
+
+          if [ "$trigger_type" = "tag" ]; then
+          
+            current_tag="${{ github.ref_name }}"
+
+            # Validate production tag naming convention.
+
+            if ! echo "$current_tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Tag '$current_tag' is not a valid production tag (expected vMAJOR.MINOR.PATCH)"
+              exit 1
+            fi
+            
+            # Resolve current tag to its commit.
+
+            if ! current_tag_sha="$(git rev-list -n 1 "$current_tag" 2>/dev/null)"; then
+              echo "::error::Unable to resolve tag '$current_tag' to a commit"
+              exit 1
+            fi
+            
+            # THE Current production tag itself must point to the main history. this closes the loophole where someone creates a perfectly formatted tag like v9.9.9 on a feature branch.
+
+            if ! git merge-base --is-ancestor "$current_tag_sha" origin/main 2>/dev/null; then
+              echo "::error::Tag '$current_tag' does not point to a commit on main. Production tags must reference main history."
+              exit 1 
+            fi
+            
+            #Previous valid Production Release.
+
+            previous_prod_tag="$(printf '%s\n' "$valid_prod_tags_sorted" | grep -vx "$current_tag" | tail -n1 || true)"
+
+            if [ -n "$previous_prod_tag" ]; then
+              
+              previous_tag_sha="$(git rev-list -n 1 "$previous_prod_tag")"
+              
+              # Version must increase
+
+              highest="$(printf '%s\n%s\n' "$previous_prod_tag" "$current_tag" | sort -V | tail -n1)"
+
+              if [ "$highest" != "$current_tag" ]; then
+                echo "::error::Tag '$current_tag' is not newer than previous valid production tag '$previous_prod_tag'. Production versions must release."
+                exit 1
+              fi
+              
+              # The New Release Must also come after the prevous release in git history.
+
+              if ! git merge-base --is-ancestor "$previous_tag_sha" "$current_tag_sha"; then
+                echo "::error::Tag '$current_tag' is not a descendant of previous production release '$previous_prod_tag'. Production releases must move forward in main history."
+                exit 1
+              fi
+              
+            fi
+            
           else
             
-            echo "aws-region=ap-south-1" >> "$GITHUB_OUTPUT"
-            echo "aws-role=PROD_ROLE_PLACEHOLDER" >> "$GITHUB_OUTPUT"
-            echo "cluster-name=prod-cluster" >> "$GITHUB_OUTPUT"
+            #Not a Tag triggered run.
+            
+            current_tag="$(printf '%s\n' "$valid_prod_tags_sorted" | tail -n1)"
+
+            previous_prod_tag="$(printf '%s\n' "$valid_prod_tags_sorted" | grep -vx "$current_tag" | tail -n1 || true)"
           
           fi
           
-  changes:
-    
-    name: Detect Changed Files
-
-    runs-on: ubuntu-latest
-
-    needs: environment
-
-    outputs:
-      changed-files: ${{ steps.detect.outputs.changed-files }}
-    
-    steps:
-      - name: Checkout Repository
-        
-        uses: actions/checkout@v4
-
-        with: 
-          fetch-depth: 0
+          # ------------------------------------------------------------------
+          # DETERMINE SHA_AFTER
+          # ------------------------------------------------------------------
           
-      - name: Detect Changed Files
+          if [ "$trigger_type" = "workflow_dispatch" ]; then
+            
+            if [ "$environment" = "prod" ]; then
+
+              # -----------------------------------------------------------------------------
+              # MANUAL PRODUCTION DEPLOYMENT / ROLLBACK
+              #
+              # Production deployments are identified by production release tags, not arbitrary commit SHAs.
+              #------------------------------------------------------------------------------
+                
+              deployment_tag="${{ inputs.deployment_tag }}"
+              
+              if [ -z "$deployment_tag" ]; then
+                echo "::error::deployment_tag is required for manual production deployments"
+                exit
+              fi
+              
+              # PRODUCTION TAG MUST FOLLOW vMAJOR.MINOR.PATCH format.
+              if ! echo "$deployment_tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+                echo "::error::Invalid production deployment tag '$deployment_tag'"
+                exit 1
+              fi
+              
+              # The requested tag must exist.
+              if ! git rev-parse --verify "refs/tags/$deployment_tag" >/dev/null 2>&1; then
+                echo "::error::Production deployment tag '$deployment_tag' does not exist"
+                exit 1
+              fi  
+
+              # Resolve Production Tag -> Commit SHA.
+              if ! deployment_tag_sha="$(git rev-list -n 1 "$deployment_tag" 2>/dev/null)"; then
+                echo "::error::Unable to resolve production deployment tag '$deployment_tag' to a commit" 
+                exit 1
+              fi
+              
+              # The tag's commit must belong to main history.
+              if ! git merge-base --is-ancestor "$deployment_tag_sha" origin/main 2>/dev/null; then
+                echo "::error::Production deployment tag '$deployment_tag' does not point to a commit on main"
+                exit 1
+              fi
+              
+              #The tag must be one of the trusted production release tags.
+              if ! printf '%s\n' "$valid_prod_tags_sorted" | grep -qx "$deployment_tag"; then
+                echo "::error::Production deployment tag '$deployment_tag' is not a valid production release"
+                exit 1
+              fi
+              
+              sha_after="$deployment_tag_sha"
+
+              echo "Production deployment target validated:"
+              echo "  tag=$deployment_tag"
+              echo "  sha_after=$sha_after"
+
+            else
+            
+              #--------------------------------------------------------------------------
+              # MANUAL DEV ENV DEPLOYMENT
+              #
+              #DEV may optionally deploy a specific commit. if no commit was requested, deploy the commit that triggered the workflow.
+              #--------------------------------------------------------------------------
+                
+              deployment_sha="${{ inputs.deployment_sha }}"
+              
+              if [ -n "$deployment_sha" ]; then
+                
+                if ! git cat-file -e "${deployment_sha}^{commit}" 2>/dev/null; then
+                  echo "::error::deployment_sha '$deployment_sha' is not a valid commit in this repository"
+                  exit 1
+                fi  
+
+                sha_after="$deployment_sha"
+
+              else
+              
+                sha_after="${{ github.sha }}"
+              
+              fi
+              
+            fi
+            
+          else
+          
+            #------------------------------------------------------------------------------------  
+            # AUTOMATIC RUN
+            #------------------------------------------------------------------------------------
+          
+            sha_after="${{ github.sha }}" 
         
-        id: detect
+          fi
+          
+          # -----------------------------------------------------------------
+          # DETERMINE SHA_BEFORE
+          # -----------------------------------------------------------------
 
-        shell: bash
+          case "$trigger_type" in
+            
+            pull_request)
+             
+              sha_before="${{ github.event.pull_request.base.sha }}"
 
+              ;;
+
+            push)
+            
+              sha_before="${{ github.event.before }}"
+
+              # First push / zero SHA means there is no previous commit.
+              # thus use repository root intentionally as the initial history comparison point.
+
+              if [ -z "$sha_before" ] || [ "$sha_before" = "0000000000000000000000000000000000000000" ]; then 
+                sha_before="$(git rev-list --max-parents=0 HEAD)"
+              fi
+              
+              ;;
+
+            tag)
+            
+              if [ -n "$previous_prod_tag" ]; then
+                
+                #compare against previous production release.
+                sha_before="$(git rev-list -n 1 "$previous_prod_tag")"
+              else
+              
+                #This is genuinely the FIRST production release. use repository root as the comparison baseline.
+                sha_before="$(git rev-list --max-parents=0 HEAD)"
+
+              fi
+              
+              ;;
+
+            workflow_dispatch)
+              if [ "$environment" = "prod" ]; then
+              
+                #---------------------------------------------------------------------------
+                # MANUAL PRODUCTION DEPLOYMENT / ROLLBACK
+                # produstion comparisons are release/tag based.
+                # if since_tag is supplied, explicity compare against that production release.
+                # if since_tag is omitted, use the previous valid production release automatically.
+                #---------------------------------------------------------------------------
+                  
+                since_tag="${{ inputs.since_tag }}"
+                
+                if [ -n "$since_tag" ]; then
+
+                  # The comparison tag must follow production tag format.
+                  if ! echo "$since_tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+                    echo "::error::Invalid production comparison tag '$since_tag'"
+                    exit 1
+                  fi
+
+                  # The comparison tag must exist.
+                  if ! git rev-parse --verify "refs/tags/$since_tag" >/dev/null 2>&1; then
+                    echo "::error::Production comparison tag '$since_tag' does not exist"
+                    exit 1
+                  fi
+
+                  # The comparison tag must resolve to a commit.
+                  if ! comparison_tag_sha="$(git rev-list -n 1 "$since_tag" 2>/dev/null)"; then
+                    echo "::error::Unable to resolve production comparison tag '$since_tag' to a commit"
+                    exit 1
+                  fi
+
+                  # The comparison tag must point into main history.
+                  if ! git merge-base --is-ancestor "$comparison_tag_sha" origin/main 2>/dev/null; then
+                    echo "::error::Production comparison tag '$since_tag' does not point to a commit on main"
+                    exit 1
+                  fi
+
+                  # The comparison tag must be a trusted production release.
+                  if ! printf '%s\n' "$valid_prod_tags_sorted" | grep -qx "$since_tag"; then
+                    echo "::error::Production comparison tag '$since_tag' is not a valid production release"
+                    exit 1
+                  fi
+
+                  sha_before="$comparison_tag_sha"
+
+                else
+                
+                  # No explicit comparison tag.
+                  # for normal manual production deployment, compare against the previous valid production release.
+
+                  if [ -n "$previous_prod_tag" ]; then
+                    sha_before="$(git rev-list -n 1 "$previous_prod_tag")"
+                  else
+                    # No previous production release exists.
+                    # This is the first production release.
+                    sha_before="$(git rev-list --max-parents=0 HEAD)"
+                  fi
+
+                fi
+                
+              else
+                
+                # ------------------------------------------------------------
+                # MANUAL DEVELOPMENT DEPLOYMENT
+                # Dev comparisons remain commit-based.
+                # ------------------------------------------------------------
+
+                since_sha="${{ inputs.since_sha }}"
+
+                if [ -n "$since_sha" ]; then
+
+                  if ! git cat-file -e "${since_sha}^{commit}" 2>/dev/null; then
+                    echo "::error::since_sha '$since_sha' is not a valid commit in this repository"
+                    exit 1
+                  fi
+
+                  sha_before="$since_sha"
+
+                else
+                  
+                  sha_before=""
+
+                fi
+                
+              fi
+              ;;
+
+            *)
+            
+              # Step 1 should already reject unknown event types.
+              #
+              # Fail closed if this branch is ever reached.
+ 
+              echo "::error::Unhandled trigger_type '$trigger_type' in SHA detection"
+              exit 1
+ 
+              ;;
+
+          esac  
+
+          # -----------------------------------------------------------------
+          # CREATE IMAGE TAG
+          # -----------------------------------------------------------------
+ 
+          image_tag="$(git rev-parse --short=12 "$sha_after")"
+
+          # -----------------------------------------------------------------
+          # EXPORT OUTPUTS
+          # -----------------------------------------------------------------
+
+              
+
+          echo "sha_before=$sha_before" >> "$GITHUB_OUTPUT"
+          echo "sha_after=$sha_after" >> "$GITHUB_OUTPUT"
+          echo "current_tag=$current_tag" >> "$GITHUB_OUTPUT"
+          echo "previous_prod_tag=$previous_prod_tag" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          
+          echo "Resolved: sha_before=$sha_before sha_after=$sha_after current_tag=$current_tag previous_prod_tag=$previous_prod_tag image_tag=$image_tag"
+
+
+      # ---------------------------------------------------------------
+      # 3) CHANGED FILES / ROOTS / SERVICES DETECTION
+      # ---------------------------------------------------------------   
+      - name: Detect changed files
+        id: changes
         run: |
-          echo "Implementation will come here"
+          set -euo pipefail
+
+          before="${{ steps.git.outputs.sha_before }}"
+          after="${{ steps.git.outputs.sha_after }}"
+          env="${{ steps.env.outputs.environment }}"
+          repo_root="$(pwd)"
+
+          if git cat-file -e "$before" 2>/dev/null; then
+            git diff --name-only "$before" "$after" > /tmp/changed_files.txt
+          else
+            # no valid base to diff against
+            git ls-tree -r "$after" --name-only > /tmp/changed_files.txt
+          fi
+          
+          echo "------ changed files -----"
+          cat /tmp/changed_files.txt
+          echo "---------------------------"
+
+          ordered_roots="vpc eks iam ecr rds secrets-manager addons dns_record frontend"
+
+          existing_roots=""
+          for r in $ordered_roots; do
+            [ -d "terraform/environments/${env}/${r}" ] && existing_roots="$existing_roots $r"
+          done
+          existing_roots="$(echo "$existing_roots" | xargs)"
+          
+          # -----------------------------------------------------------------
+          # 1) ROOTS DIRECTLY CHANGED
+          #    (files under terraform/environments/<env>/<root>/...)
+          # -----------------------------------------------------------------
+          directly_changed=""
+          for r in $existing_roots; do
+            if grep -q "^terraform/environments/${env}/${r}/" /tmp/changed_files.txt; then
+              directly_changed="$directly_changed $r"
+            fi
+          done     
+
+
+          directly_roots_json="["
+          first="true"
+
+          for root in $ordered_roots; do
+            root_dir="terraform/environments/${env}/${root}"
+            [ -d "$root_dir" ] || continue
+
+            if printf ' %s ' "$directly_changed" | grep -q " $root "; then
+              [ "$first" = "true" ] || directly_roots_json="${directly_roots_json},"
+              directly_roots_json="${directly_roots_json}\"${root}\""
+              first="false"
+            fi
+          done
+
+          directly_roots_json="${directly_roots_json}]"
+
+          # -----------------------------------------------------------------
+          # 2) MODULES THAT CHANGED
+          #    (directory names under terraform/modules/)
+          # -----------------------------------------------------------------
+
+          changed_modules="$(grep -oE '^terraform/modules/[^/]+' /tmp/changed_files.txt | sed 's#terraform/modules/##' | sort -u | xargs || true)"
+          
+          # -----------------------------------------------------------------
+          # 3) WHICH ROOTS ACTUALLY CONSUME A CHANGED MODULE
+          # -----------------------------------------------------------------
+          
+          module_consumer_roots="" 
+          if [ -n "$changed_modules" ]; then
+            for r in $existing_roots; do
+              root_dir="terraform/environments/${env}/${r}"
+              for tf in "$root_dir"/*.tf; do
+                [ -f "$tf" ] || continue
+                while IFS= read -r src; do
+                  [ -z "$src" ] && continue
+                  case "$src" in
+                    ./*|../*) ;;
+                    *) continue ;;
+                  esac
+                  resolved="$(realpath -m --relative-to="$repo_root" "$(dirname "$tf")/$src" 2>/dev/null || true)"
+                  for m in $changed_modules; do
+                    if [ "$resolved" = "terraform/modules/$m" ]; then
+                      module_consumer_roots="$module_consumer_roots $r" 
+                    fi
+                  done
+                done < <(grep -oE 'source[[:space:]]*=[[:space:]]*"[^"]+"' "$tf" | sed -E 's/source[[:space:]]*=[[:space:]]*"([^"]+)"/\1/')
+              done
+            done
+          fi
+          module_consumer_roots="$(echo "$module_consumer_roots" | xargs -n1 2>/dev/null | sort -u | xargs || true)"
+          
+          # initial impacted set = directly changed + module consumers
+          impacted="$(printf '%s\n' $directly_changed $module_consumer_roots | sed '/^$/d' | sort -u | xargs || true)"
+
+
+          # -----------------------------------------------------------------
+          # 4) FOLLOW terraform_remote_state DEPENDENCIES DOWNSTREAM
+          # -----------------------------------------------------------------
+
+          declare -A deps_of
+          for r in $existing_roots; do
+            root_dir="terraform/environments/${env}/${r}"
+            deps=""
+            for tf in "$root_dir"/*.tf; do
+              [ -f "$tf" ] || continue
+              while IFS= read -r keyval; do
+                [ -z "$keyval" ] && continue
+                dep_root="$(echo "$keyval" | awk -F'/' '{print $2}')"
+                # exclude a root's own backend.tf state key (self-reference,
+                # not an actual cross-root dependency)
+                if [ -n "$dep_root" ] && [ "$dep_root" != "$r" ]; then
+                  deps="$deps $dep_root"
+                fi
+              done < <(grep -oE 'key[[:space:]]*=[[:space:]]*"[^"]+/terraform\.tfstate"' "$tf" | sed -E 's/key[[:space:]]*=[[:space:]]*"([^"]+)"/\1/')
+            done
+            deps_of["$r"]="$(echo "$deps" | xargs -n1 2>/dev/null | sort -u | xargs || true)"
+          done
+          
+          changed_flag=1
+          while [ "$changed_flag" -eq 1 ]; do
+            changed_flag=0
+            for r in $existing_roots; do
+              if printf ' %s ' "$impacted" | grep -q " $r "; then
+                continue
+              fi
+              for dep in ${deps_of[$r]:-}; do
+                if printf ' %s ' "$impacted" | grep -q " $dep "; then
+                  impacted="$impacted $r"
+                  changed_flag=1
+                  break
+                fi
+              done
+            done
+          done
+          impacted="$(echo "$impacted" | xargs -n1 2>/dev/null | sort -u | xargs || true)"
+          
+          echo "directly_changed=$directly_changed | changed_modules=$changed_modules | module_consumer_roots=$module_consumer_roots | final impacted=$impacted"
+
+          # -----------------------------------------------------------------
+          # 5) CALCULATE DEPENDENCY-SAFE TERRAFORM EXECUTION LEVELS
+          #
+          # Each level contains roots that can safely execute in parallel.
+          # -----------------------------------------------------------------
+
+          remaining="$impacted"
+          execution_levels_json="["
+          level=0
+          first_level="true"
+          while [ -n "$remaining" ]; do
+            level_roots=""
+            for r in $remaining; do
+              can_run="true"
+              # check every dependency of this root.
+              
+              # the root can run at this level only if none of its
+              # impacted dependencies are still waiting in "remaining".
+              for dep in ${deps_of[$r]:-}; do
+                if printf ' %s ' "$remaining" | grep -q " $dep "; then
+                  can_run="false"
+                  break
+                fi
+              done
+              if [ "$can_run" = "true" ]; then
+                level_roots="$level_roots $r"
+              fi
+            done
+            level_roots="$(echo "$level_roots" | xargs -n1 2>/dev/null | sort -u | xargs || true)"
+            # -----------------------------------------------------------------
+            # SAFETY CHECK
+            # If impacted roots remain but no root can be placed into the
+            # current level, the dependency graph contains a cycle or an
+            # otherwise unresolved dependency.
+            #
+            # Fail closed instead of producing an unsafe execution plan.
+            # -----------------------------------------------------------------
+
+            if [ -z "$level_roots" ]; then
+              echo "::error::Unable to resolve terraform dependency execution levels. the impacted dependency graph may contain a cycle or unresolved dependency."  
+              exit 1
+            fi
+
+            # Add this level to the JSON array
+            [ "$first_level" = "true" ] || execution_levels_json="${execution_levels_json},"
+            execution_levels_json="${execution_levels_json}["
+            first_root="true"
+            # Preserve the same deterministic dependency-safe root ordering
+            # used elsewhere in this step.
+            for root in $ordered_roots; do
+              if printf ' %s ' "$level_roots" | grep -q "$root"; then
+                [ "$first_root" = "true" ] || execution_levels_json="${execution_levels_json},"\
+                execution_levels_json="${execution_levels_json}\"${root}\""
+                first_root="false" 
+              fi
+            done
+            execution_levels_json="${execution_levels_json}]"
+            first_level="false"
+
+            # remove everything assigned to this level from the "remaining" set.
+            next_remaining=""
+            for r in $remaining; do
+              if ! printf ' %s ' "$level_roots" | grep -q " $r "; then
+                next_remaining="$next_remaining $r"
+              fi
+            done
+            remaining="$(echo "$next_remaining" | xargs -n1 2>/dev/null | sort -u | xargs || true)"
+            level=$((level + 1))
+          done
+          execution_levels_json="${execution_levels_json}]"
+          echo "Terraform execution levels: $execution_levels_json"
+
+
+          # -----------------------------------------------------------------
+          # 6) FINAL OUTPUT, IN DEPENDENCY-SAFE ORDER
+          # -----------------------------------------------------------------
+
+          roots_json="["
+          first="true"
+          for root in $ordered_roots; do
+            root_dir="terraform/environments/${env}/${root}"
+            [ -d "$root_dir" ] || continue
+             
+            if printf ' %s ' "$impacted" | grep -q " $root "; then
+              [ "$first" = "true" ] || roots_json="${roots_json},"
+              roots_json="${roots_json}\"${root}\""
+              first="false"
+            fi
+          done
+          roots_json="${roots_json}]"
+          
+          services_json="["
+          first="true"
+          for svc in auth-service cart-service; do
+            if grep -q "^services/${svc}/" /tmp/changed_files.txt; then
+              [ "$first" = "true" ] || services_json="${services_json},"
+              services_json="${services_json}\"${svc}\""
+              first="false"
+            fi
+          done
+          services_json="${services_json}]"
+          
+          frontend_changed="false"
+          if grep -q '^services/frontend/' /tmp/changed_files.txt; then
+            frontend_changed="true"
+          fi
+          
+          has_infra_changes="false"
+          [ "$roots_json" != "[]" ] && has_infra_changes="true"
+
+          has_backend_changes="false"
+          [ "$services_json" != "[]" ] && has_backend_changes="true"
+
+          {
+            echo "changed_terraform_roots=$roots_json"
+            echo "changed_backend_services=$services_json"
+            echo "frontend_changed=$frontend_changed"
+            echo "terraform_execution_levels=$execution_levels_json"
+            echo "directly_changed_terraform_roots=$directly_roots_json"
+            echo "has_infra_changes=$has_infra_changes"
+            echo "has_backend_changes=$has_backend_changes"
+            echo "has_frontend_changes=$frontend_changed"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved: roots=$roots_json services=$services_json frontend_changed=$frontend_changed"
+
+          
+      # ---------------------------------------------------------------
+      # 4) GLOBAL OUTPUTS (region / account / role ARNs / cluster name)
+      # ---------------------------------------------------------------
+
+          
+      - name: Set Global Outputs
+        id: global
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID}}
+        run: |
+          set -euo pipefail
+              
+          if [ -z "${PROJECT_NAME:-}" ] || [ -z "${AWS_REGION:-}" ] || [ -z "${AWS_ACCOUNT_ID:-}" ]; then
+            echo "::error::PROJECT_NAME, AWS_REGION and AWS_ACCOUNT_ID must be set as repository (or org) Actions variables - see Settings > Secrets and variables > Actions > Variables"
+            exit 1
+          fi
+
+          env="${{ steps.env.outputs.environment }}"
+
+
+          # role names must exactly match terraform/modules/iam's naming:
+          # "${project_name}-${environment}-<terraform|deployment|frontend>-role"
+
+          terraform_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-${env}-terraform-role"
+          deployment_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-${env}-deployment-role"
+          frontend_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-${env}-frontend-role"
+          terraform_plan_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-${env}-terraform-plan-role"
+
+          # matches terraform/environments/<env>/eks's cluster_name = "${project_name}-${environment}"
+          eks_cluster_name="${PROJECT_NAME}-${env}"
+
+          {
+            echo "aws_region=$AWS_REGION"
+            echo "aws_account_id=$AWS_ACCOUNT_ID"
+            echo "terraform_role_arn=$terraform_role_arn"
+            echo "deployment_role_arn=$deployment_role_arn"
+            echo "frontend_role_arn=$frontend_role_arn"
+            echo "eks_cluster_name=$eks_cluster_name"
+            echo "terraform_plan_role_arn=$terraform_plan_role_arn"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved: region=$AWS_REGION cluster=$eks_cluster_name"
+
+
+
+
+
+ 
+
+
+
+               
+
+            
+
+
+
+
+
+                  
+          
+
+
+
+
+
+

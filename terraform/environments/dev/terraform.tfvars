@@ -26,6 +26,11 @@ repositories = [
   "cart-service"
 ]
 
+app_namespaces = [
+  "auth",
+  "cart"
+]
+
 cluster_version = "1.33"
 
 node_instance_types = [

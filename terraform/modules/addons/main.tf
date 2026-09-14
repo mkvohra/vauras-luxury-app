@@ -259,3 +259,92 @@ resource "aws_iam_role_policy_attachment" "external_dns" {
 
   policy_arn = aws_iam_policy.external_dns.arn
 }
+
+
+#--------------------------------------------------------------------------------------------------------------------
+
+# EXTERNAL SECRETS OPERATOR (ESO)
+#
+# reads the project's app-secrets from AWS secrets manager and sync them
+# into kubernetes secrets. Scoped to only that one secret - not
+#secretsmanager:* generally - since that's the only thing ESO needs to
+# do here.
+
+# ESO POLICY (scoped to just this project/environment's secret, not "*")
+
+data "aws_iam_policy_document" "external_secrets" {
+
+  statement {
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret"
+    ]
+
+    resources = [
+      var.app_secret_arn
+    ]
+  }
+}
+
+resource "aws_iam_policy" "external_secrets" {
+
+  name = "${var.project_name}-${var.environment}-external-secrets-policy"
+
+  policy = data.aws_iam_policy_document.external_secrets.json
+}
+
+# EXTERNAL-SECRETS TRUST POLICY
+
+data "aws_iam_policy_document" "external_secrets_assume_role" {
+
+  statement {
+
+    actions = [
+      "sts:AssumeRoleWithWebIdentity"
+    ]
+
+    principals {
+      type = "Federated"
+
+      identifiers = [
+        var.cluster_oidc_provider_arn
+      ]
+    }
+
+    condition {
+      test = "StringEquals"
+
+      variable = "${replace(var.cluster_oidc_issuer_url, "https://", "")}:sub"
+
+      values = [
+        "system:serviceaccount:kube-system:external-secrets"
+      ]
+    }
+
+    condition {
+      test = "StringEquals"
+
+      variable = "${replace(var.cluster_oidc_issuer_url, "https://", "")}:aud"
+
+      values = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+#EXTERNAL-SECRETS IAM ROLE
+
+resource "aws_iam_role" "external_secrets" {
+  
+  name = "${var.project_name}-${var.environment}-external-secrets-role"
+
+  assume_role_policy = data.aws_iam_policy_document.external_secrets_assume_role.json
+}
+
+# ATTACH POLICY
+
+resource "aws_iam_role_policy_attachment" "external_secrets" {
+
+  role = aws_iam_role.external_secrets.name
+
+  policy_arn = aws_iam_policy.external_secrets.arn
+}

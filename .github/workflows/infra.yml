@@ -1,0 +1,561 @@
+name: infrastructure (Terraform)
+
+# Trigger rules (agreed design):
+#   PR: feature -> dev        => plan (directly changed roots only, review)
+#   push (merge): -> dev      => plan (review) + apply (dependency levels, manual approval)
+#   PR: dev -> main            => plan (review)
+#   push (merge): -> main      => plan (review) - no apply, prod applies are tag-gated
+#   tag vX.Y.Z pushed          => plan (review) + apply (dependency levels, manual approval)
+#   workflow_dispatch          => plan (review) + apply (dependency levels, manual approval)
+#
+# ARCHITECTURE:
+#   `plan` is a single review/information job. It only plans DIRECTLY
+#   changed roots (fast, cheap) and reports other impacted-downstream
+#   roots by name only, without planning them. It uses the dedicated
+#   plan-only IAM role (terraform_plan_role_arn) - not environment-scoped,
+#   so it never waits on approval. It never creates or uploads a plan
+#   artifact.
+#
+#   `apply` is a single deployment job, gated by the protected dev/prod
+#   GitHub Environment. It does NOT consume anything `plan` produced -
+#   it depends only on `detect`, and does its own fresh plan immediately
+#   before applying each dependency level:
+#
+#     plan all roots in level -> if all succeed -> apply all roots in
+#     level -> wait for every apply -> next level
+#
+#   Roots within one level run in parallel via backgrounded bash
+#   processes (this is what actually solves GitHub Actions' static-job-
+#   graph limitation - the level loop lives inside one job's script, so
+#   the number of levels is no longer capped by how many job blocks are
+#   defined). Planning fresh right before each level's apply avoids ever
+#   applying a stale plan, at the cost of not showing a human the exact
+#   diff before it's applied - the approval gate happens at the job/
+#   environment level, before any of this runs, not per-diff.
+#
+# NOTE ON ROLE SEPARATION: `plan` and `apply` intentionally use two
+# different IAM roles (terraform_plan_role_arn vs terraform_role_arn).
+# The plan-only role's trust policy is not tied to the protected
+# dev/prod GitHub Environment, so `plan` never waits on the
+# required-reviewers approval that's meant to gate `apply` only.
+#
+# NOTE ON OVERLAP: for deployment-triggered runs (push-to-dev, tag,
+# workflow_dispatch), `plan` and `apply` both become eligible from the
+# same `detect` output and are NOT ordered against each other (apply
+# only needs detect, not plan) - they can run concurrently. `plan` only
+# plans directly-changed roots while `apply` re-plans+applies the full
+# impacted set per level, so there is some redundant read-only work
+# against the same roots in that window. Read-only plan calls against a
+# root already being applied can occasionally hit a transient
+# "state locked" error from the other side - Terraform surfaces this
+# clearly and it is not a correctness risk, just a possible noisy
+# retry-worthy failure in the review job during that overlap.
+#
+# NOTE ON TRIGGERS: deliberately no `paths:` filter - see
+# reusable-workflow.yml's tag validation, which must run for every tag
+# regardless of whether it happens to also touch terraform/**. `detect`
+# is cheap (no AWS calls) and has_infra_changes (real git diff) gates
+# the expensive jobs below.
+
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      requested_environment:
+        description: "Target environment (dev or prod)"
+        required: true
+        type: choice
+        options: [dev, prod]
+      since_sha:
+        description: "[dev only] Optional baseline commit SHA to diff against"
+        required: false
+        type: string
+      deployment_sha:
+        description: "[dev only] Optional commit SHA to deploy. Defaults to the triggering commit."
+        required: false
+        type: string
+      deployment_tag:
+        description: "[prod only] Production release tag to deploy, e.g. v2.3.0. Required for manual prod runs."
+        required: false
+        type: string
+      since_tag:
+        description: "[prod only] Optional production release tag to compare against. Defaults to the previous release."
+        required: false
+        type: string
+        
+        
+
+permissions: 
+  contents: read
+  pull-requests: write
+  
+  
+
+jobs:
+  # =======================================================================
+  # DETECTION - no AWS calls, no environment, free to run on every trigger
+  # =======================================================================
+
+  detect:
+    uses: ./.github/workflows/reusable-workflow.yml
+    with:
+      requested_environment: ${{ inputs.requested_environment }}
+      since_sha: ${{ inputs.since_sha }}
+      deployment_sha: ${{ inputs.deployment_sha }}
+      deployment_tag: ${{ inputs.deployment_tag }}
+      since_tag: ${{ inputs.since_tag }}
+      
+  # ---------------------------------------------------------------------
+  # PLAN
+  #
+  # Runs for:
+  #   - PR -> dev
+  #   - PR -> main
+  #   - push -> main
+  #   - and also runs as the first stage of deployment-triggered workflows
+  #
+  # Review/information planning ONLY plans roots that were directly changed.
+  # Other impacted roots are reported but are not planned yet.
+  #
+  # Deployment workflows do their own fresh plan immediately before each
+  # apply level, so we deliberately DO NOT create/upload tfplan artifacts.
+  # ---------------------------------------------------------------------
+
+  plan:
+    needs: detect
+    if: needs.detect.outputs.has_infra_changes == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: infra-plan-${{ needs.detect.outputs.environment }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: false
+      
+    # IMPORTANT:
+    # Do NOT attach the protected dev/prod GitHub Environment here.
+    #
+    # Plan must not wait for deployment approval.
+    # This requires the dedicated plan-only IAM role whose trust policy
+    # is not tied to the protected dev/prod Environment.
+
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write  
+
+    steps:
+      - name: Terraform context (checkout + AWS auth + terraform)
+        uses: ./.github/actions/terraform-context
+        with:
+          ref: ${{ needs.detect.outputs.sha_after }}
+          role-to-assume: ${{ needs.detect.outputs.terraform_plan_role_arn }}
+          aws-region: ${{ needs.detect.outputs.aws_region }}
+          
+      - name: Terraform plan - directly changed roots
+        env:
+          ROOTS_JSON: ${{ needs.detect.outputs.directly_changed_terraform_roots }}
+          IMPACTED_ROOTS_JSON: ${{ needs.detect.outputs.changed_terraform_roots }}
+          ENVIRONMENT: ${{ needs.detect.outputs.environment }}
+        run: |
+          set -euo pipefail
+          
+          summary_file="/tmp/plan_summary.md"
+
+          {
+            echo "## Terraform Plan"
+            echo ""
+            echo "**Environment:** \`${ENVIRONMENT}\`"
+            echo ""
+            echo "### Directly changed roots"
+            echo ""
+          } > "$summary_file"
+
+          echo "$ROOTS_JSON" | jq -r '.[]' | while read -r root; do
+            echo "- \`${root}\`" >> "$summary_file"
+          done  
+
+          {
+            echo ""
+            echo "### Impacted downstream roots"
+            echo ""
+          } >> "$summary_file"
+          
+          impacted_count="$(echo "$IMPACTED_ROOTS_JSON" | jq 'length')"
+          direct_count="$(echo "$ROOTS_JSON" | jq 'length')"
+
+          if [ "$impacted_count" -gt "$direct_count" ]; then
+            echo "$IMPACTED_ROOTS_JSON" \
+              | jq -r --argjson direct "$ROOTS_JSON" '
+                  .[] |
+                  select(. as $root | ($direct | index($root) | not))
+                  | "- `\(. )` — impacted, planned during deployment"
+                ' >> "$summary_file"  
+          else
+            echo "- None" >> "$summary_file"
+          fi
+          
+          echo "" >> "$summary_file"
+          echo "### Plan output" >> "$summary_file"
+          echo "" >> "$summary_file"
+
+          plan_failed="false"
+
+          while read -r root; do
+            [ -n "$root" ] || continue
+
+            dir="terraform/environments/${ENVIRONMENT}/${root}"
+
+            echo "::group::terraform plan - ${root}"
+
+            {
+              echo "#### \`${root}\`"
+              echo '```'
+            } >> "$summary_file"
+
+            set +e
+
+            (
+              cd "$dir"
+
+              terraform init \
+                -input=false \
+                -no-color
+
+              terraform fmt \
+                -check \
+                -diff \
+                -recursive
+
+              terraform validate \
+                -no-color
+                
+              terraform plan \
+                -input=false \
+                -no-color \
+                -var-file=../terraform.tfvars  
+            ) > "/tmp/plan_output_${root}.txt" 2>&1
+
+            root_exit=$?
+
+            set -e
+
+            cat "/tmp/plan_output_${root}.txt"
+            cat "/tmp/plan_output_${root}.txt" >> "$summary_file"
+
+            {
+              echo '```'
+              echo ""
+            } >> "$summary_file"
+
+            echo "::endgroup::"
+
+            if [ "$root_exit" -ne 0 ]; then
+              echo "::error::terraform plan failed for root '${root}'"
+              plan_failed="true"
+            fi
+
+          done < <(echo "$ROOTS_JSON" | jq -r '.[]')
+          
+          if [ "$plan_failed" = "true" ]; then
+            exit 1
+          fi
+
+      - name: Write plan summary
+        if: always()
+        run: |
+          cat /tmp/plan_summary.md >> "$GITHUB_STEP_SUMMARY"
+          
+      - name: Post plan summary to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let body = fs.readFileSync(
+              '/tmp/plan_summary.md',
+              'utf8'
+            );
+
+            const MAX = 65000;
+
+            if (body.length > MAX) {
+              body =
+                body.slice(0, MAX) +
+                "\n\n... (truncated, see workflow run logs for the full plan)";
+            }
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+  # ---------------------------------------------------------------------
+  # APPLY
+  #
+  # Deployment triggers:
+  #   - push -> dev
+  #   - tag -> main / prod
+  #   - workflow_dispatch -> dev or prod
+  #
+  # The GitHub Environment protection gate is attached HERE, not to plan.
+  #
+  # For each dependency level:
+
+  # validate/plan all roots
+  #        ↓
+  # if all planning succeeds
+  #        ↓
+  # apply each root with a fresh Terraform plan
+  #        ↓
+  # wait for every apply
+  #        ↓
+  # next level
+  #
+  # Plans for later levels are intentionally generated only after earlier
+  # levels have been applied, preventing stale dependency plans.
+  # ---------------------------------------------------------------------
+  
+  
+  apply:
+    needs: 
+      - detect
+      - plan
+    if: |
+      needs.detect.outputs.has_infra_changes == 'true' &&
+      (
+        needs.detect.outputs.trigger_type == 'tag' ||
+        needs.detect.outputs.trigger_type == 'workflow_dispatch' ||
+        (
+          needs.detect.outputs.trigger_type == 'push' &&
+          needs.detect.outputs.environment == 'dev'
+        )
+      )
+    runs-on: ubuntu-latest
+    environment: ${{ needs.detect.outputs.environment }} 
+    concurrency:
+      # environment-only (no ref/PR) - ALL applies to the same environment
+      # serialize globally, since they mutate the same real Terraform
+      # state regardless of which trigger/ref initiated them
+      group: infra-apply-${{ needs.detect.outputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Terraform context (checkout + AWS auth + terraform)
+        uses: ./.github/actions/terraform-context
+        with:
+          ref: ${{ needs.detect.outputs.sha_after }}
+          role-to-assume: ${{ needs.detect.outputs.terraform_role_arn }}
+          aws-region: ${{ needs.detect.outputs.aws_region }}
+          
+      - name: Terraform deployment - dependency levels
+        env:
+          LEVELS_JSON: ${{ needs.detect.outputs.terraform_execution_levels }}
+          ENVIRONMENT: ${{ needs.detect.outputs.environment }}
+        run: |
+          set -euo pipefail
+          
+          level_count="$(echo "$LEVELS_JSON" | jq 'length')"
+
+          if [ "$level_count" -eq 0 ]; then
+            echo "No Terraform execution levels found."
+            exit 0
+          fi
+          
+          echo "Terraform execution levels:"
+          echo "$LEVELS_JSON" | jq .
+
+          for ((level_index=0; level_index<level_count; level_index++)); do
+            level_json="$(echo "$LEVELS_JSON" | jq -c ".[$level_index]")"
+
+            echo ""
+            echo "=================================================="
+            echo "Terraform execution level ${level_index}"
+            echo "=================================================="
+            echo "$level_json" | jq .
+
+            # -----------------------------------------------------------
+            # PLAN ALL ROOTS IN THIS LEVEL
+            # -----------------------------------------------------------
+
+            plan_pids=()
+            plan_roots=()
+            
+            while read -r root; do
+              [ -n "$root" ] || continue
+
+              plan_roots+=("$root") 
+
+              (
+                set -euo pipefail
+
+                dir="terraform/environments/${ENVIRONMENT}/${root}"
+
+                echo "::group::terraform plan - ${root}"
+                
+                cd "$dir"
+
+                terraform init \
+                  -input=false \
+                  -no-color
+                
+                terraform fmt \
+                  -check \
+                  -diff \
+                  -recursive
+                  
+                terraform validate \
+                  -no-color
+                  
+                terraform plan \
+                  -input=false \
+                  -no-color \
+                  -var-file=../terraform.tfvars
+                
+                echo "::endgroup::"  
+              ) > "/tmp/deployment_plan_${level_index}_${root}.log" 2>&1 &
+              
+              plan_pids+=("$!")
+            
+            done < <(echo "$level_json" | jq -r '.[]')
+            
+            plan_failed="false"
+
+            for i in "${!plan_pids[@]}"; do
+            
+              pid="${plan_pids[$i]}"
+              root="${plan_roots[$i]}"
+
+              if wait "$pid"; then
+                echo "::notice::Terraform plan succeded for '${root}'"
+              else
+                echo "::error::Terraform plan failed for '${root}'"
+                plan_failed="true"
+              fi
+              
+              cat "/tmp/deployment_plan_${level_index}_${root}.log"
+            
+            done
+            
+            if [ "$plan_failed" = "true" ]; then
+              echo "::error::At least one Terraform plan failed in execution level ${level_index}. Aborting deployment."
+              exit 1
+            fi
+
+            # -----------------------------------------------------------
+            # APPLY ALL ROOTS IN THIS LEVEL
+            #
+            # We are already inside an approved GitHub Environment job.
+            # -auto-approve only skips Terraform's interactive prompt.
+            # It does NOT bypass GitHub Environment approval.
+            # -----------------------------------------------------------
+
+            apply_pids=()
+            apply_roots=()
+            
+            for root in "${plan_roots[@]}"; do
+
+              apply_roots+=("$root")
+
+              (
+                set -euo pipefail
+
+                dir="terraform/environments/${ENVIRONMENT}/${root}"
+                
+                echo "::group::terraform apply - ${root}"
+
+                cd "$dir"
+
+                terraform init \
+                  -input=false \
+                  -no-color
+
+                terraform apply \
+                  -input=false \
+                  -no-color \
+                  -auto-approve \
+                  -var-file=../terraform.tfvars
+                  
+                echo "::endgroup::"  
+              ) > "/tmp/deployment_apply_${level_index}_${root}.log" 2>&1 &
+
+              apply_pids+=("$!")
+
+            done
+            
+            apply_failed="false"
+
+            for i in "${!apply_pids[@]}"; do
+
+              pid="${apply_pids[$i]}"
+              root="${apply_roots[$i]}"
+
+              if wait "$pid"; then
+                echo "::notice::Terraform apply succeeded for '${root}'"
+              else
+                echo "::error::Terraform apply failed for '${root}'"
+                apply_failed="true"
+              fi    
+
+              cat "/tmp/deployment_apply_${level_index}_${root}.log"
+
+            done
+            
+            if [ "$apply_failed" = "true" ]; then
+              echo "::error::At least one Terraform apply failed in execution level ${level_index}. Later levels will NOT run."
+              exit 1
+            fi
+            
+            echo ""
+            echo "Execution level ${level_index} completed successfully."
+
+          done
+          
+          echo ""
+          echo "All Terraform execution levels completed successfully."
+
+
+      - name: Deployment summary
+        env: 
+          LEVELS_JSON: ${{ needs.detect.outputs.terraform_execution_levels }}
+          ENVIRONMENT: ${{ needs.detect.outputs.environment }}
+          IMAGE_TAG: ${{ needs.detect.outputs.image_tag }}
+        
+        run: |
+          {
+            echo "## Terraform Deployment"
+            echo ""
+            echo "**Environment:** \`${ENVIRONMENT}\`"
+            echo ""
+            echo "**Commit:** \`${IMAGE_TAG}\`"
+            echo ""
+            echo "### Execution levels"
+            echo ""
+            echo "$LEVELS_JSON" | jq -r '
+              to_entries[] |
+              "- Level \(.key): \(.value | join(", "))"
+            '
+          } >> "$GITHUB_STEP_SUMMARY"
+           
+ 
+
+  # =======================================================================
+  # No-op visibility job
+  # =======================================================================
+
+  no-changes:
+    needs: detect
+    if: needs.detect.outputs.has_infra_changes == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: No infra changes detected
+        run: echo "No Terraform roots were impacted by this change - nothing to plan or apply."  

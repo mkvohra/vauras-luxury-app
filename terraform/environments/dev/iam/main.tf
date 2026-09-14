@@ -8,6 +8,27 @@ data "aws_iam_openid_connect_provider" "github" {
 
 #========================================================================================================
 
+# USING EKS REMOTE STATE
+# (this is what tells insra.yml's dependency-level detection that iam
+# must apply after eks - the EKS access entry resources below need the 
+# cluster to already exist, not just a string that looks like its name)
+
+data "terraform_remote_state" "eks" {
+
+  backend = "s3"
+
+  config = {
+
+    bucket = "vauras-terraform-state"
+
+    key = "dev/eks/terraform.tfstate"
+
+    region = "ap-south-1"
+  }
+}
+
+#========================================================================================================
+
 #CALLING IAM MODULE
 
 module "iam" {
@@ -30,9 +51,11 @@ module "iam" {
 
   terraform_lock_table = var.terraform_lock_table
 
-  cluster_name = "${var.project_name}-${var.environment}"
+  cluster_name = data.terraform_remote_state.eks.outputs.cluster_name
 
   bucket_name = var.bucket_name
 
   ecr_repositories = var.repositories  
+
+  app_namespaces = var.app_namespaces
 }

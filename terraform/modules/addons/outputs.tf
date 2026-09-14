@@ -21,3 +21,7 @@ output "external_dns_role_arn" {
 output "external_dns_role_name" {
   value = aws_iam_role.external_dns.name
 } 
+
+output "external_secrets_role_arn" {
+  value = aws_iam_role.external_secrets.arn
+} 

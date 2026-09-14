@@ -39,8 +39,6 @@ autoscaling:
 
 readinessProbe:
   enabled: true
-  httpGet:
-    path: /health
   initialDelaySeconds: 20
   periodSeconds: 10
   timeoutSeconds: 5
@@ -48,8 +46,6 @@ readinessProbe:
 
 livenessProbe:
   enabled: true
-  httpGet:
-    path: /health
   initialDelaySeconds: 30
   periodSeconds: 20
   timeoutSeconds: 5
@@ -73,7 +69,8 @@ configMap:
   immutable: true
   data: {}
 
-secret:
+externalSecret:
   enabled: false
-  immutable: true
-  data: {}
+  secretStoreName: cluster-secret-store
+  refreshInterval: 1h
+  remoteSecretName: ""

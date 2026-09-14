@@ -19,17 +19,11 @@ configMap:
     NODE_ENV: development
     PORT: "3001"
 
-secret:
+externalSecret:
   enabled: true
+  remoteSecretName: "vauras-luxury-app/dev/app-secrets"
 
-  data: 
-    JWT_SECRET: ""
-    DB_HOST: ""
-    DB_PORT: ""
-    DB_NAME: ""
-    DB_USER: ""
-    DB_PASSWORD: "" 
-
+  
 autoscaling:
   enabled: false 
 
